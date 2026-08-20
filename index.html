@@ -188,6 +188,21 @@
             display: inline-block;
             margin-top: 12px;
         }
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: #2f3136;
+            border-radius: 2px;
+            margin-top: 12px;
+            overflow: hidden;
+        }
+        .progress-bar .fill {
+            height: 100%;
+            background: linear-gradient(90deg, #5865f2, #6c8cff);
+            width: 0%;
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
         @media (max-width: 550px) {
             .glass-card { padding: 28px 18px; }
             .input-row { flex-direction: column; }
@@ -199,7 +214,7 @@
 <body>
 <div class="glass-card">
     <div class="title"><span>Генератор Steam Lua Tools</span></div>
-    <div class="sub-head">ультра-быстрый поиск по JSON-файлам</div>
+    <div class="sub-head">быстрый поиск по JSON-файлам</div>
 
     <div class="input-group">
         <label for="gameId"><i class="fas fa-hashtag"></i> Введите AppID игры</label>
@@ -220,6 +235,11 @@
             </div>
         </div>
         <div id="statusBadge"></div>
+        <div id="progressContainer" class="hidden">
+            <div class="progress-bar">
+                <div class="fill" id="progressFill"></div>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -235,15 +255,24 @@
         const statusBadge = document.getElementById('statusBadge');
         const downloadLua = document.getElementById('downloadLua');
         const downloadManifest = document.getElementById('downloadManifest');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
 
         let currentLuaContent = '';
         let currentManifestContent = '';
 
-        // === УЛЬТРА-БЫСТРЫЙ ПОИСК В JSON ===
+        function updateProgress(percent) {
+            progressContainer.classList.remove('hidden');
+            progressFill.style.width = percent + '%';
+        }
+
+        // === ПОИСК В JSON (одним потоком, с прогрессом) ===
         async function findValueInJson(url, key, fileSize) {
-            const chunkSize = 1024 * 1024; // 1MB чанки для скорости
-            
-            for (let position = 0; position < fileSize; position += chunkSize) {
+            const chunkSize = 512 * 1024; // 512KB чанки
+            let position = 0;
+            let lastMatch = null;
+
+            while (position < fileSize) {
                 const end = Math.min(position + chunkSize - 1, fileSize - 1);
                 const response = await fetch(url, {
                     headers: { 'Range': `bytes=${position}-${end}` }
@@ -254,59 +283,48 @@
                 }
 
                 const chunk = await response.text();
+                
+                // Ищем ключ
                 const pattern = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`);
                 const match = chunk.match(pattern);
                 
                 if (match) {
                     return match[1];
                 }
+
+                position += chunkSize;
+                updateProgress(Math.min((position / fileSize) * 100, 99));
             }
+
             return null;
         }
 
-        // === УЛЬТРА-БЫСТРЫЙ СБОР ДЕПОТОВ ===
+        // === СБОР ВСЕХ ДЕПОТОВ (с прогрессом) ===
         async function findAllDepots(url, fileSize) {
-            const chunkSize = 2 * 1024 * 1024; // 2MB чанки для скорости
-            const depots = {};
+            const chunkSize = 512 * 1024; // 512KB чанки
             let position = 0;
+            const depots = {};
 
-            // Создаем пул запросов для параллельной загрузки
-            const requests = [];
-            const totalChunks = Math.ceil(fileSize / chunkSize);
-            const maxConcurrent = 5; // Максимум 5 параллельных запросов
+            while (position < fileSize) {
+                const end = Math.min(position + chunkSize - 1, fileSize - 1);
+                const response = await fetch(url, {
+                    headers: { 'Range': `bytes=${position}-${end}` }
+                });
 
-            for (let i = 0; i < totalChunks; i++) {
-                const start = i * chunkSize;
-                const end = Math.min(start + chunkSize - 1, fileSize - 1);
-                requests.push({ start, end });
-            }
+                if (!response.ok && response.status !== 206) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
 
-            // Обрабатываем запросы с ограничением параллельности
-            const results = [];
-            for (let i = 0; i < requests.length; i += maxConcurrent) {
-                const batch = requests.slice(i, i + maxConcurrent);
-                const batchPromises = batch.map(({ start, end }) => 
-                    fetch(url, {
-                        headers: { 'Range': `bytes=${start}-${end}` }
-                    }).then(response => {
-                        if (!response.ok && response.status !== 206) {
-                            throw new Error(`HTTP ${response.status}`);
-                        }
-                        return response.text();
-                    })
-                );
-
-                const batchResults = await Promise.all(batchPromises);
-                results.push(...batchResults);
-            }
-
-            // Парсим все чанки
-            for (const chunk of results) {
+                const chunk = await response.text();
+                
                 const regex = /"(\d+)":\s*"([^"]+)"/g;
                 let match;
                 while ((match = regex.exec(chunk)) !== null) {
                     depots[match[1]] = match[2];
                 }
+
+                position += chunkSize;
+                updateProgress(Math.min((position / fileSize) * 100, 99));
             }
 
             return depots;
@@ -347,6 +365,7 @@
             if (!appId || !/^\d+$/.test(appId)) {
                 results.classList.remove('hidden');
                 downloadSection.classList.add('hidden');
+                progressContainer.classList.add('hidden');
                 statusBadge.innerHTML = `<span class="badge-error"><i class="fas fa-circle-exclamation"></i> Введите корректный AppID</span>`;
                 terminalOutput.innerHTML = `<span class="error">⚠️ Ошибка: введите корректный Steam AppID (только цифры).</span>`;
                 return;
@@ -356,6 +375,7 @@
             generateBtn.innerHTML = '<span class="spinner"></span> Поиск...';
             results.classList.remove('hidden');
             downloadSection.classList.add('hidden');
+            progressContainer.classList.add('hidden');
             statusBadge.innerHTML = '';
             terminalOutput.innerHTML = `<span class="info">🔍 Поиск для AppID: ${appId}...</span>`;
 
@@ -363,36 +383,56 @@
 
             try {
                 // Получаем размеры файлов
+                terminalOutput.innerHTML += `\n<span class="info">📂 Получение размеров файлов...</span>`;
+                
                 const [tokensSize, depotsSize] = await Promise.all([
                     getFileSize(baseUrl + 'appaccesstokens.json'),
                     getFileSize(baseUrl + 'depotkeys.json')
                 ]);
 
-                terminalOutput.innerHTML = `<span class="info">📂 Загрузка данных...</span>`;
+                terminalOutput.innerHTML += `\n<span class="info">📦 Размер токенов: ${(tokensSize / 1024 / 1024).toFixed(2)}MB</span>`;
+                terminalOutput.innerHTML += `\n<span class="info">📦 Размер депотов: ${(depotsSize / 1024 / 1024).toFixed(2)}MB</span>`;
 
-                // Параллельно ищем токен и депоты
-                const [token, depots] = await Promise.all([
-                    findValueInJson(baseUrl + 'appaccesstokens.json', appId, tokensSize),
-                    findAllDepots(baseUrl + 'depotkeys.json', depotsSize)
-                ]);
-
-                if (Object.keys(depots).length === 0) {
-                    terminalOutput.innerHTML = `<span class="warning">⚠️ Депоты не найдены.</span>`;
-                } else {
-                    terminalOutput.innerHTML = `<span class="success">✅ Найдено ${Object.keys(depots).length} депотов</span>`;
+                // Ищем токен
+                terminalOutput.innerHTML += `\n<span class="info">🔎 Поиск токена...</span>`;
+                updateProgress(0);
+                
+                const token = await findValueInJson(baseUrl + 'appaccesstokens.json', appId, tokensSize);
+                
+                if (!token) {
+                    terminalOutput.innerHTML += `\n<span class="error">❌ Токен не найден</span>`;
+                    statusBadge.innerHTML = `<span class="badge-error"><i class="fas fa-circle-exclamation"></i> Токен не найден</span>`;
+                    generateBtn.disabled = false;
+                    generateBtn.innerHTML = '<i class="fas fa-cog"></i> Сгенерировать';
+                    progressContainer.classList.add('hidden');
+                    return;
                 }
 
+                terminalOutput.innerHTML += `\n<span class="success">✅ Токен найден</span>`;
+
+                // Ищем депоты
+                terminalOutput.innerHTML += `\n<span class="info">🔎 Поиск депотов...</span>`;
+                updateProgress(0);
+                
+                const depots = await findAllDepots(baseUrl + 'depotkeys.json', depotsSize);
+
+                terminalOutput.innerHTML += `\n<span class="success">✅ Найдено ${Object.keys(depots).length} депотов</span>`;
+
                 // Генерируем файлы
+                terminalOutput.innerHTML += `\n<span class="info">📝 Генерация файлов...</span>`;
+                
                 const { lua, manifest } = generateFiles(appId, depots);
                 currentLuaContent = lua;
                 currentManifestContent = manifest;
 
+                updateProgress(100);
                 terminalOutput.innerHTML += `\n<span class="success">✅ Готово!</span>`;
                 statusBadge.innerHTML = `<span class="badge-success"><i class="fas fa-check-circle"></i> ${Object.keys(depots).length} депотов</span>`;
                 downloadSection.classList.remove('hidden');
+                setTimeout(() => progressContainer.classList.add('hidden'), 1000);
 
             } catch (error) {
-                terminalOutput.innerHTML = `<span class="error">⚠️ Ошибка: ${error.message}</span>`;
+                terminalOutput.innerHTML += `\n<span class="error">⚠️ Ошибка: ${error.message}</span>`;
                 statusBadge.innerHTML = `<span class="badge-error"><i class="fas fa-circle-exclamation"></i> Ошибка</span>`;
             } finally {
                 generateBtn.disabled = false;
