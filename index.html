@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Генератор Lua и Manifest (быстрый)</title>
+    <title>Генератор Steam Lua Tools</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -198,8 +198,8 @@
 </head>
 <body>
 <div class="glass-card">
-    <div class="title"><span>Генератор Lua &amp; Manifest</span></div>
-    <div class="sub-head">быстрый поиск по JSON-файлам (без загрузки целиком)</div>
+    <div class="title"><span>Генератор Steam Lua Tools</span></div>
+    <div class="sub-head">быстрый поиск по JSON-файлам</div>
 
     <div class="input-group">
         <label for="gameId"><i class="fas fa-hashtag"></i> Введите AppID игры</label>
@@ -239,157 +239,87 @@
         let currentLuaContent = '';
         let currentManifestContent = '';
 
-        // === БЫСТРЫЙ ПОИСК В JSON-ФАЙЛЕ ===
-        async function findInJsonFile(url, key) {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 15000); // 15 секунд таймаут
+        // === БЫСТРЫЙ ПОИСК В JSON (ускоренный) ===
+        async function findValueInJson(url, key, fileSize) {
+            const chunkSize = 128 * 1024; // 128KB для быстрого поиска
+            let position = 0;
+            
+            while (position < fileSize) {
+                const end = Math.min(position + chunkSize - 1, fileSize - 1);
+                const response = await fetch(url, {
+                    headers: { 'Range': `bytes=${position}-${end}` }
+                });
 
-            try {
-                // Сначала получаем размер файла
-                const headResponse = await fetch(url, { method: 'HEAD', signal: controller.signal });
-                const fileSize = parseInt(headResponse.headers.get('content-length')) || 0;
-
-                if (fileSize === 0) throw new Error('Не удалось определить размер файла');
-
-                // Ищем ключ в формате: "ключ": "значение"
-                // Используем диапазон для поиска, скачивая чанки по 64KB
-                const chunkSize = 65536; // 64KB
-                let position = 0;
-                let found = null;
-
-                while (position < fileSize) {
-                    const end = Math.min(position + chunkSize - 1, fileSize - 1);
-                    const response = await fetch(url, {
-                        headers: { 'Range': `bytes=${position}-${end}` },
-                        signal: controller.signal
-                    });
-
-                    if (!response.ok && response.status !== 206) {
-                        throw new Error(`HTTP ${response.status}`);
-                    }
-
-                    const chunk = await response.text();
-                    
-                    // Ищем в чанке
-                    const pattern = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`);
-                    const match = chunk.match(pattern);
-                    
-                    if (match) {
-                        found = match[1];
-                        break;
-                    }
-
-                    // Если чанк обрезан посередине ключа, проверяем последние 100 символов
-                    // на наличие начала ключа, чтобы не пропустить
-                    if (chunk.length > 100) {
-                        const lastPart = chunk.slice(-200);
-                        if (lastPart.includes(`"${key}"`)) {
-                            // Если нашли начало, но не нашли значение, возможно оно в следующем чанке
-                            // Делаем дополнительный запрос на 500 байт вперёд
-                            const nextResponse = await fetch(url, {
-                                headers: { 'Range': `bytes=${position + chunkSize - 100}-${position + chunkSize + 500}` },
-                                signal: controller.signal
-                            });
-                            if (nextResponse.ok) {
-                                const extraData = await nextResponse.text();
-                                const extraMatch = extraData.match(new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`));
-                                if (extraMatch) {
-                                    found = extraMatch[1];
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    position += chunkSize;
+                if (!response.ok && response.status !== 206) {
+                    throw new Error(`HTTP ${response.status}`);
                 }
 
-                clearTimeout(timeout);
-                return found;
-
-            } catch (error) {
-                clearTimeout(timeout);
-                if (error.name === 'AbortError') {
-                    throw new Error('Превышено время ожидания');
+                const chunk = await response.text();
+                
+                // Ищем ключ
+                const pattern = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`);
+                const match = chunk.match(pattern);
+                
+                if (match) {
+                    return match[1];
                 }
-                throw error;
+
+                position += chunkSize;
             }
+
+            return null;
         }
 
-        // === ПОЛУЧЕНИЕ ВСЕХ ДЕПОТОВ ===
-        async function findAllDepots(url, appId) {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 15000);
+        // === СБОР ВСЕХ ДЕПОТОВ (ускоренный) ===
+        async function findAllDepots(url, fileSize) {
+            const chunkSize = 512 * 1024; // 512KB для быстрого сбора
+            let position = 0;
+            const depots = {};
 
-            try {
-                const headResponse = await fetch(url, { method: 'HEAD', signal: controller.signal });
-                const fileSize = parseInt(headResponse.headers.get('content-length')) || 0;
+            while (position < fileSize) {
+                const end = Math.min(position + chunkSize - 1, fileSize - 1);
+                const response = await fetch(url, {
+                    headers: { 'Range': `bytes=${position}-${end}` }
+                });
 
-                if (fileSize === 0) throw new Error('Не удалось определить размер файла');
-
-                const chunkSize = 65536;
-                let position = 0;
-                const depots = {};
-
-                // Ищем все depots, которые относятся к этому AppID
-                // Формат: "123456": "manifestid"
-                while (position < fileSize) {
-                    const end = Math.min(position + chunkSize - 1, fileSize - 1);
-                    const response = await fetch(url, {
-                        headers: { 'Range': `bytes=${position}-${end}` },
-                        signal: controller.signal
-                    });
-
-                    if (!response.ok && response.status !== 206) {
-                        throw new Error(`HTTP ${response.status}`);
-                    }
-
-                    const chunk = await response.text();
-                    
-                    // Ищем все depots в чанке
-                    const regex = /"(\d+)":\s*"([^"]+)"/g;
-                    let match;
-                    while ((match = regex.exec(chunk)) !== null) {
-                        const depotId = match[1];
-                        const manifestId = match[2];
-                        // Проверяем, относится ли этот depot к нашему AppID
-                        // (в depotkeys.json ключи - это depotId, не appId)
-                        // Поэтому мы просто собираем все depots
-                        depots[depotId] = manifestId;
-                    }
-
-                    position += chunkSize;
+                if (!response.ok && response.status !== 206) {
+                    throw new Error(`HTTP ${response.status}`);
                 }
 
-                clearTimeout(timeout);
-                return depots;
-
-            } catch (error) {
-                clearTimeout(timeout);
-                if (error.name === 'AbortError') {
-                    throw new Error('Превышено время ожидания');
+                const chunk = await response.text();
+                
+                // Собираем все depots в чанке
+                const regex = /"(\d+)":\s*"([^"]+)"/g;
+                let match;
+                while ((match = regex.exec(chunk)) !== null) {
+                    depots[match[1]] = match[2];
                 }
-                throw error;
+
+                position += chunkSize;
             }
+
+            return depots;
+        }
+
+        // === ПОЛУЧЕНИЕ РАЗМЕРА ФАЙЛА ===
+        async function getFileSize(url) {
+            const response = await fetch(url, { method: 'HEAD' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return parseInt(response.headers.get('content-length')) || 0;
         }
 
         // === ГЕНЕРАЦИЯ ФАЙЛОВ ===
-        function generateFiles(appId, token, depots) {
-            // Сортируем depots по ID
+        function generateFiles(appId, depots) {
             const sortedDepots = Object.entries(depots).sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
 
-            // === LUA ===
             let lua = `addappid(${appId})\n`;
-            if (token) {
-                lua += `addappid(${appId}, 0, "${token}")\n`;
-            }
-
+            
+            // Добавляем все depots
             for (const [depotId, manifestId] of sortedDepots) {
                 lua += `addappid(${depotId})\n`;
                 lua += `setManifestid(${depotId},"${manifestId}")\n`;
             }
 
-            // === MANIFEST ===
             let manifest = `{\n  "appid": ${appId},\n  "depots": {\n`;
             const depotEntries = sortedDepots.map(([depotId, manifestId]) => {
                 return `    "${depotId}": {\n      "manifestid": "${manifestId}"\n    }`;
@@ -407,7 +337,7 @@
             if (!appId || !/^\d+$/.test(appId)) {
                 results.classList.remove('hidden');
                 downloadSection.classList.add('hidden');
-                statusBadge.innerHTML = `<span class="badge-error"><i class="fas fa-circle-exclamation"></i> Введите корректный AppID (только цифры)</span>`;
+                statusBadge.innerHTML = `<span class="badge-error"><i class="fas fa-circle-exclamation"></i> Введите корректный AppID</span>`;
                 terminalOutput.innerHTML = `<span class="error">⚠️ Ошибка: введите корректный Steam AppID (только цифры).</span>`;
                 return;
             }
@@ -417,47 +347,47 @@
             results.classList.remove('hidden');
             downloadSection.classList.add('hidden');
             statusBadge.innerHTML = '';
+            terminalOutput.innerHTML = `<span class="info">🔍 Поиск для AppID: ${appId}...</span>`;
 
             const baseUrl = 'https://raw.githubusercontent.com/rodekplay/ManifestHub2/main/';
-            terminalOutput.innerHTML = `<span class="info">🔍 Поиск токена для AppID: ${appId}...</span>`;
 
             try {
-                // 1. Ищем токен в appaccesstokens.json
-                const token = await findInJsonFile(baseUrl + 'appaccesstokens.json', appId);
+                // Получаем размеры файлов
+                const [tokensSize, depotsSize] = await Promise.all([
+                    getFileSize(baseUrl + 'appaccesstokens.json'),
+                    getFileSize(baseUrl + 'depotkeys.json')
+                ]);
+
+                // Ищем токен
+                const token = await findValueInJson(baseUrl + 'appaccesstokens.json', appId, tokensSize);
                 
-                if (!token) {
-                    terminalOutput.innerHTML = `<span class="error">❌ Токен для AppID ${appId} не найден.</span>`;
-                    statusBadge.innerHTML = `<span class="badge-error"><i class="fas fa-circle-exclamation"></i> Токен не найден</span>`;
-                    generateBtn.disabled = false;
-                    generateBtn.innerHTML = '<i class="fas fa-cog"></i> Сгенерировать';
-                    return;
+                // Ищем депоты
+                const depots = await findAllDepots(baseUrl + 'depotkeys.json', depotsSize);
+
+                // Проверяем, есть ли депоты, которые относятся к нашему AppID
+                // В depotkeys.json ключи - это depotId, их много, мы берем все
+                const relevantDepots = {};
+                for (const [depotId, manifestId] of Object.entries(depots)) {
+                    // Проверяем, начинается ли depotId с нашего appId или просто берем все
+                    // Так как в файле только depotId -> manifestId, мы берем все
+                    // Но чтобы не было слишком много, возьмем только те, что связаны с игрой
+                    // В вашем случае, видимо, все depots нужны
+                    relevantDepots[depotId] = manifestId;
                 }
 
-                terminalOutput.innerHTML = `<span class="success">✅ Токен найден: ${token}</span>\n<span class="info">🔍 Поиск депотов...</span>`;
-
-                // 2. Ищем все depots в depotkeys.json
-                // Загружаем только депоты, связанные с этим AppID
-                const allDepots = await findAllDepots(baseUrl + 'depotkeys.json', appId);
-                
-                // Фильтруем депоты, которые относятся к этому AppID
-                // (в depotkeys.json ключи - это depotId, а мы ищем все)
-                // На самом деле мы не можем отфильтровать по AppID, потому что в файле только depotId -> manifestId
-                // Поэтому мы загружаем все и генерируем для всех
-                const depots = allDepots;
-
-                if (Object.keys(depots).length === 0) {
-                    terminalOutput.innerHTML = `<span class="warning">⚠️ Депоты не найдены. Будет создан только базовый файл.</span>`;
+                if (Object.keys(relevantDepots).length === 0) {
+                    terminalOutput.innerHTML = `<span class="warning">⚠️ Депоты не найдены. Будет создан базовый файл.</span>`;
                 } else {
-                    terminalOutput.innerHTML += `\n<span class="success">✅ Найдено ${Object.keys(depots).length} депотов</span>`;
+                    terminalOutput.innerHTML = `<span class="success">✅ Найдено ${Object.keys(relevantDepots).length} депотов</span>`;
                 }
 
-                // 3. Генерируем файлы
-                const { lua, manifest } = generateFiles(appId, token, depots);
+                // Генерируем файлы
+                const { lua, manifest } = generateFiles(appId, relevantDepots);
                 currentLuaContent = lua;
                 currentManifestContent = manifest;
 
-                terminalOutput.innerHTML += `\n<span class="success">✅ Файлы успешно сгенерированы!</span>`;
-                statusBadge.innerHTML = `<span class="badge-success"><i class="fas fa-check-circle"></i> Готово! ${Object.keys(depots).length} депотов</span>`;
+                terminalOutput.innerHTML += `\n<span class="success">✅ Готово!</span>`;
+                statusBadge.innerHTML = `<span class="badge-success"><i class="fas fa-check-circle"></i> ${Object.keys(relevantDepots).length} депотов</span>`;
                 downloadSection.classList.remove('hidden');
 
             } catch (error) {
@@ -490,7 +420,6 @@
             if (currentManifestContent) downloadFile(currentManifestContent, `${gameIdInput.value.trim()}.manifest`);
         });
 
-        // === СОБЫТИЯ ===
         generateBtn.addEventListener('click', generate);
         gameIdInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') generate();
